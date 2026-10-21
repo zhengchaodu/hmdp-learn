@@ -1,6 +1,8 @@
 package com.hmdp.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.bean.copier.CopyOptions;
+import cn.hutool.core.lang.UUID;
 import cn.hutool.core.util.RandomUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.Result;
@@ -11,10 +13,17 @@ import com.hmdp.service.IUserService;
 import com.hmdp.utils.RegexUtils;
 import jdk.nashorn.internal.runtime.regexp.joni.Regex;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import javax.annotation.Resource;
 import javax.servlet.http.HttpSession;
 
+
+import java.util.HashMap;
+import java.util.Map;
+
+import static com.hmdp.utils.RedisConstants.*;
 import static com.hmdp.utils.SystemConstants.USER_NICK_NAME_PREFIX;
 
 /**
@@ -29,6 +38,8 @@ import static com.hmdp.utils.SystemConstants.USER_NICK_NAME_PREFIX;
 @Service
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IUserService {
 
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
     @Override
     public Result sendCode(String phone, HttpSession session) {
         // 1、校验手机号
@@ -38,8 +49,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         }
         // 3、符合，生成校验码
         String code = RandomUtil.randomNumbers(6);
-        // 4、保存验证码到session
-        session.setAttribute("code", code);
+        // 4、保存验证码到redis,set key value expireTime unit，有效期
+        stringRedisTemplate.opsForValue().set(LOGIN_CODE_KEY + phone, code, LOGIN_CODE_TTL, java.util.concurrent.TimeUnit.MINUTES);
         // 5、发送验证码,这里不做真实的
         log.debug("发送短信验证码成功，验证码：{}", code);
         // 返回ok
@@ -54,8 +65,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             // 2、如果不符合、返回错误信息
             return Result.fail("手机号格式错误");
         }
-        // 3、从session获取验证码并校验
-        Object cacheCode = session.getAttribute("code");
+        // 3、从redis获取验证码并校验
+        Object cacheCode = stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY + phone);
         String code = loginForm.getCode();
         if (cacheCode == null || !cacheCode.toString().equals(code)) {
             // 不一致，报错
@@ -69,20 +80,26 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             // 6、不存在，创建新用户并保存
             user = createUserWithPhone(phone);
         }
-        // 7、保存用户信息到session中
-        // session.setAttribute("user", user);
-        // 这样写会有敏感信息泄露的问题
-        session.setAttribute("user", BeanUtil.copyProperties(user, UserDTO.class));
-        // BeanUtil.copyProperties的作用是将user对象的属性复制到UserDTO对象中，这样就不会将user对象中的敏感信息（如密码）暴露给前端。
-        // 8、返回ok
-        return Result.ok();
-        // 不需要返回登陆凭证，
-        // 因为使用了session，session会在服务端保存用户信息，
-        // 并且会在响应头中返回一个cookie，
-        // cookie中包含了session的id，浏览器会自动保存这个cookie，
-        // 并在后续的请求中带上这个cookie，
-        // 这样服务端就可以根据cookie中的session id找到对应的session，
-        // 从而获取到用户信息。
+        // 7、保存用户信息到redis中
+        // 7.1 随机生成token，作为登录令牌
+        String token = UUID.randomUUID().toString(true);
+        // 7.2 将 User 对象转为 HashMap 存储，并把所有 value 转成 String
+        UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
+        Map<String, Object> userMap = BeanUtil.beanToMap(
+                userDTO,
+                new HashMap<>(),
+                CopyOptions.create()
+                        .setIgnoreNullValue(true)
+                        .setFieldValueEditor((fieldName, fieldValue) ->
+                                fieldValue == null ? null : fieldValue.toString())
+        );
+        // 7.3 存储
+        stringRedisTemplate.opsForHash().putAll(LOGIN_USER_KEY + token, userMap);
+        // 7.4 设置token有效期
+        stringRedisTemplate.expire(LOGIN_USER_KEY + token, LOGIN_USER_TTL, java.util.concurrent.TimeUnit.MINUTES);
+        // 仅仅这样设置的话，有效期只是从登录开始的30分钟，因此要在每次访问时都要刷新有效期，这个在拦截器中实现
+        // 8、返回token
+        return Result.ok(token);
     }
 
     private User createUserWithPhone(String phone) {
