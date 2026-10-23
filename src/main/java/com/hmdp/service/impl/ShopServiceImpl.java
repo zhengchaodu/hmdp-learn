@@ -36,7 +36,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         // 缓存穿透方法
         // Shop shop = queryWithPassThrough(id);
         // 使用互斥锁解决缓存击穿
-        Shop shop = queryWithMutex(id);
+        Shop shop = queryWithMutex_Func1(id);
         if (shop == null) {
             return Result.fail("商铺不存在");
         }
@@ -44,7 +44,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         return Result.ok(shop);
     }
     // 使用锁的方式
-    public Shop queryWithMutex(Long id) {
+    public Shop queryWithMutex_Func1(Long id) {
         String key = CACHE_SHOP_KEY + id;
         // 1.从redis查询商铺信息
         String shopJson = stringRedisTemplate.opsForValue().get(key);
@@ -69,7 +69,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             if (!isLock) {
                 // 4.3.失败，则休眠并重试
                 Thread.sleep(50);
-                return queryWithMutex(id);
+                return queryWithMutex_Func1(id);
             }
             // 4.4.成功，根据id查询数据库
             shop = getById(id);
@@ -90,7 +90,61 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         // 9.返回
         return shop;
     }
-
+    // 上面那种方法有问题
+    // return queryWithMutex(id) 的意图是“没抢到锁就等一会再来”，这个重试思路本身没错；
+    //但它写在 try 块里，return 会触发 finally，导致没抢到锁的线程也执行了 unlock，把别人的锁删了。
+    // 在递归过程中会反复触发unlock，尽管那个lock已经被别的拿走了，最终导致锁失效，缓存击穿。
+    public Shop queryWithMutex_Func2(Long id) {
+        String key = CACHE_SHOP_KEY + id;
+        // 1.从redis查询商铺信息
+        String shopJson = stringRedisTemplate.opsForValue().get(key);
+        // 2.判断是否存在
+        if (StrUtil.isNotBlank(shopJson)) {
+            // 3.存在，直接返回
+            Shop shop = JSONUtil.toBean(shopJson, Shop.class);
+            return shop;
+        }
+        // 判断命中的是否是空值
+        if (shopJson != null) {
+            // 返回错误信息
+            return null;
+        }
+        // 4.实现缓存重建
+        // 4.1.获取互斥锁
+        String lockKey = LOCK_SHOP_KEY + id;
+        Shop shop = null;
+        while (true) {
+            boolean isLock = this.tryLock(lockKey);
+            // 4.2.判断是否获取成功
+            if (!isLock) {
+                // 4.3.失败，则休眠并重试
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+                continue;
+            }
+            try {
+                // 4.4.成功，根据id查询数据库
+                shop = getById(id);
+                // 5.不存在，返回错误
+                if (shop == null) {
+                    // 6.将空值写入redis，防止缓存穿透
+                    stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                    return null;
+                }
+                // 7.存在，写入redis
+                stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop), CACHE_SHOP_TTL, TimeUnit.MINUTES);
+            } finally {
+                // 8.释放锁
+                unlock(lockKey);
+            }
+            break;
+        }
+        // 9.返回
+        return shop;
+    }
     // 缓存穿透时，我们可以使用缓存空值的方式来解决
     public Shop queryWithPassThrough(Long id){
         // 1. 从redis查询商铺信息
