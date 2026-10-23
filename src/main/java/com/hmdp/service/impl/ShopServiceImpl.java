@@ -13,8 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 
-import static com.hmdp.utils.RedisConstants.CACHE_SHOP_KEY;
-import static com.hmdp.utils.RedisConstants.CACHE_SHOP_TTL;
+import static com.hmdp.utils.RedisConstants.*;
 
 /**
  * <p>
@@ -38,10 +37,18 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             Shop shop = JSONUtil.toBean(shopJson, Shop.class);
             return Result.ok(shop);
         }
+        // 9.判断命中的是否是空值
+        // 不是真实数据（上面判断的），也不是null，那就只能是""咯
+        if (shopJson != null) {
+            // 返回错误信息
+            return Result.fail("商铺不存在");
+        }
         // 4. 不存在，根据id查询数据库
         Shop shop = getById(id);
         // 5.不存在，返回错误
         if (shop == null) {
+            // 8.将空值写入redis，防止缓存穿透
+            stringRedisTemplate.opsForValue().set(CACHE_SHOP_KEY + id, "", CACHE_NULL_TTL, java.util.concurrent.TimeUnit.MINUTES);
             return Result.fail("商铺不存在");
         }
         // 6.存在，写入redis
