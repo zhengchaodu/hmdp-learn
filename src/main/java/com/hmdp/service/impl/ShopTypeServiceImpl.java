@@ -14,7 +14,7 @@ import org.springframework.stereotype.Service;
 import javax.annotation.Resource;
 import java.util.List;
 
-import static com.hmdp.utils.RedisConstants.SHOP_GEO_KEY;
+import static com.hmdp.utils.RedisConstants.CACHE_SHOP_TYPE_KEY;
 
 /**
  * <p>
@@ -31,7 +31,7 @@ public class ShopTypeServiceImpl extends ServiceImpl<ShopTypeMapper, ShopType> i
     @Override
     public Result queryTypeList() {
         // 1.在redis中查询商铺类型列表
-        String typeListJson = stringRedisTemplate.opsForValue().get(SHOP_GEO_KEY);
+        String typeListJson = stringRedisTemplate.opsForValue().get(CACHE_SHOP_TYPE_KEY);
         // 2.存在，则直接返回
         if (typeListJson != null) {
             List<ShopType> shopTypeList = JSONUtil.toList(typeListJson, ShopType.class);
@@ -44,7 +44,7 @@ public class ShopTypeServiceImpl extends ServiceImpl<ShopTypeMapper, ShopType> i
             return Result.fail("商铺类型不存在");
         }
         // 5.存在，则写入redis
-        stringRedisTemplate.opsForValue().set(SHOP_GEO_KEY, JSONUtil.toJsonStr(shopTypeList), RedisConstants.CACHE_SHOP_TTL, java.util.concurrent.TimeUnit.MINUTES);
+        stringRedisTemplate.opsForValue().set(CACHE_SHOP_TYPE_KEY, JSONUtil.toJsonStr(shopTypeList), RedisConstants.CACHE_SHOP_TTL, java.util.concurrent.TimeUnit.MINUTES);
         // 6.返回
         return Result.ok(shopTypeList);
     }
