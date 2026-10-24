@@ -116,6 +116,115 @@ public class CacheClient {
         // 7.失败，返回过期的商铺信息
         return r;
     }
+    // 使用锁的方式
+    public <R,ID> R queryWithMutex_Func1(String keyPrefix,ID id, Class<R> type, String lockPrefix, Function<ID,R> dbFallback, Long time, TimeUnit unit) {
+        String key = keyPrefix + id;
+        // 1.从redis查询信息
+        String json = stringRedisTemplate.opsForValue().get(key);
+        // 2.判断是否存在
+        if (StrUtil.isNotBlank(json)) {
+            // 3.存在，直接返回
+            R r = JSONUtil.toBean(json, type);
+            return r;
+        }
+        // 判断命中的是否是空值
+        if (json != null) {
+            // 返回错误信息
+            return null;
+        }
+        // 4.实现缓存重建
+        // 4.1.获取互斥锁
+        String lockKey = lockPrefix + id;
+        R r = null;
+        try {
+            boolean isLock = this.tryLock(lockKey);
+            // 4.2.判断是否获取成功
+            if (!isLock) {
+                // 4.3.失败，则休眠并重试
+                Thread.sleep(50);
+                return this.queryWithMutex_Func1(keyPrefix, id, type, lockPrefix, dbFallback, time, unit);
+            }
+            // 4.4.成功，根据id查询数据库
+            r = dbFallback.apply(id);
+            // 5.不存在，返回错误
+            if (r == null) {
+                // 6.将空值写入redis，防止缓存穿透
+                stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                // 不能用 this.set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                // 因为这个方法会把""序列化成json，变成"\"\""，而不是""，所以要直接用stringRedisTemplate
+                return null;
+            }
+            // 7.存在，写入redis
+            this.set(key, r, time, unit);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        } finally {
+            // 8.释放锁
+            unlock(lockKey);
+        }
+        // 9.返回
+        return r;
+    }
+    // 上面那种方法有问题
+    // return queryWithMutex(id) 的意图是“没抢到锁就等一会再来”，这个重试思路本身没错；
+    //但它写在 try 块里，return 会触发 finally，导致没抢到锁的线程也执行了 unlock，把别人的锁删了。
+    // 在递归过程中会反复触发unlock，尽管那个lock已经被别的拿走了，最终导致锁失效，缓存击穿。
+    public <R,ID> R queryWithMutex_Func2(String keyPrefix,ID id, Class<R> type, String lockPrefix, Function<ID,R> dbFallback, Long time, TimeUnit unit) {
+        String key = keyPrefix + id;
+        // 1.从redis查询信息
+        String json = stringRedisTemplate.opsForValue().get(key);
+        // 2.判断是否存在
+        if (StrUtil.isNotBlank(json)) {
+            // 3.存在，直接返回
+            R r = JSONUtil.toBean(json, type);
+            return r;
+        }
+        // 判断命中的是否是空值
+        if (json != null) {
+            // 返回错误信息
+            return null;
+        }
+        // 4.实现缓存重建
+        // 4.1.获取互斥锁
+        String lockKey = lockPrefix + id;
+        R r = null;
+        while (true) {
+            boolean isLock = this.tryLock(lockKey);
+            // 4.2.判断是否获取成功
+            if (!isLock) {
+                // 4.3.失败，则休眠并重试
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+                continue;
+            }
+            try {
+                // 4.4.成功，根据id查询数据库
+                // 其实这里也可以再查一次redis，防止在获取锁的过程中，其他线程已经把数据写入redis了
+                r = dbFallback.apply(id);
+                // 5.不存在，返回错误
+                if (r == null) {
+                    // 6.将空值写入redis，防止缓存穿透
+                    stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                    // 不能用 this.set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                    // 因为这个方法会把""序列化成json，变成"\"\""，而不是""，所以要直接用stringRedisTemplate
+                    return null;
+                }
+                // 7.存在，写入redis
+               this.set(key, r, time, unit);
+            } finally {
+                // 8.释放锁
+                unlock(lockKey);
+            }
+            break;
+        }
+        // 9.返回
+        return r;
+    }
+
+
     // 写两个方法用于上锁和释放
     private boolean tryLock(String key) {
         Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", 10, TimeUnit.SECONDS);
