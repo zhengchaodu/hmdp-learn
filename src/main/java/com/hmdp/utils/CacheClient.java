@@ -41,7 +41,7 @@ public class CacheClient {
         // 2.写入redis
         stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(redisData));
     }
-    // 方法3.根据指定的key获取缓存,并利用空值缓存解决缓存击穿问题
+    // 方法3.根据指定的key获取缓存,并利用空值缓存解决缓存穿透问题
     public <R,ID> R queryWithPassThrough(String keyPrefix, ID id, Class <R> type, Function<ID,R> dbFallback, Long time, TimeUnit unit) {
         String key = keyPrefix + id;
         // 1. 从redis查询信息
@@ -84,9 +84,16 @@ public class CacheClient {
             // 注意：逻辑过期方案要求热点 key 已预热，key 不存在属于异常/非热点场景
             return null;
         }
-        // 4.存在，但不是Blank，需要先把json反序列化为对象
+        // 改进，如果 R 是 String、集合等，或 data 不是 JSONObject，
+        // 会 ClassCastException 或类型转换错误。通用方法不能这样强转。
+        // 4.存在，但不是Blank，需要先把json反序列化为RedisData对象
         RedisData redisData = JSONUtil.toBean(json, RedisData.class);
-        R r = JSONUtil.toBean((JSONObject) redisData.getData(), type);
+        Object data = redisData.getData();
+        if (data == null) {
+            return null;
+        }
+        // 通用反序列化，不依赖data的具体类型
+        R r = JSONUtil.toBean(JSONUtil.toJsonStr(data), type);
         LocalDateTime expireTime = redisData.getExpireTime();
         // 5.判断是否过期
         if (LocalDateTime.now().isBefore(expireTime)) {
@@ -104,9 +111,16 @@ public class CacheClient {
                 try {
                     // 6.4.查询数据库
                     R r1 = dbFallback.apply(id);
-                    // 6.5.写入redis
-                    this.setWithLogicalExpire(key, r1, time, unit);
+                    if(r1 == null) {
+                        // 数据库不存在，写空值缓存，防止反复重建/穿透
+                        stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                    } else {
+                        // 6.5.写入redis
+                        this.setWithLogicalExpire(key, r1, time, unit);
+                    }
+
                 } catch (Exception e) {
+                    // log.error("缓存重建失败, key={}", key, e);
                     throw new RuntimeException(e);
                 } finally {
                     unlock(lockKey);
@@ -142,6 +156,7 @@ public class CacheClient {
             if (!isLock) {
                 // 4.3.失败，则休眠并重试
                 Thread.sleep(50);
+                // 递归查询有栈溢出的问题，这里暂时就不改了
                 return this.queryWithMutex_Func1(keyPrefix, id, type, lockPrefix, dbFallback, time, unit);
             }
             // 4.4.成功，根据id查询数据库
@@ -187,8 +202,10 @@ public class CacheClient {
         // 4.实现缓存重建
         // 4.1.获取互斥锁
         String lockKey = lockPrefix + id;
+        // 改进，queryWithMutex_Func2 的 while(true) 没有最大重试/超时
+        int maxRetry = 200; // 50ms * 200 ≈ 10s
         R r = null;
-        while (true) {
+        for(int i = 0; i < maxRetry; i++) {
             boolean isLock = this.tryLock(lockKey);
             // 4.2.判断是否获取成功
             if (!isLock) {
@@ -202,7 +219,17 @@ public class CacheClient {
             }
             try {
                 // 4.4.成功，根据id查询数据库
-                // 其实这里也可以再查一次redis，防止在获取锁的过程中，其他线程已经把数据写入redis了
+                // 改进，其实这里也可以再查一次redis，防止在获取锁的过程中，其他线程已经把数据写入redis了
+                String cacheJson = stringRedisTemplate.opsForValue().get(key);
+                if (StrUtil.isNotBlank(cacheJson)) {
+                    // 是真的数据，直接返回
+                    return JSONUtil.toBean(cacheJson, type);
+                }
+                // 不是真的数据，又不是null，那就只能是""的空值缓存咯，所以直接返回null
+                if (cacheJson != null) {
+                    return null;
+                }
+
                 r = dbFallback.apply(id);
                 // 5.不存在，返回错误
                 if (r == null) {
@@ -220,7 +247,7 @@ public class CacheClient {
             }
             break;
         }
-        // 9.返回
+        // 9.
         return r;
     }
 
