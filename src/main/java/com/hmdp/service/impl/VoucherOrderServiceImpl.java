@@ -38,27 +38,32 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     public Result seckillVoucher(Long voucherId) {
 
         // 1. 校验优惠券是否存在
-        SeckillVoucher seckillVoucher = seckillVoucherService.getById(voucherId);
-        if (seckillVoucher == null) {
+        SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
+        if (voucher == null) {
             return Result.fail("优惠券不存在");
         }
         // 2.判断是否开始
-        if (seckillVoucher.getBeginTime().isAfter(LocalDateTime.now())) {
+        if (voucher.getBeginTime().isAfter(LocalDateTime.now())) {
             return Result.fail("秒杀未开始");
         }
         // 3.判断是否结束
-        if (seckillVoucher.getEndTime().isBefore(LocalDateTime.now())) {
+        if (voucher.getEndTime().isBefore(LocalDateTime.now())) {
             return Result.fail("秒杀已结束");
         }
         // 4.判断是否还有库存
-        if (seckillVoucher.getStock() <= 0) {
+        Integer stock = voucher.getStock();
+        if (stock<= 0) {
             return Result.fail("秒杀已售罄");
         }
         // 5.扣减库存
         boolean success = seckillVoucherService.update()
                             .setSql("stock = stock - 1")
                             .eq("voucher_id", voucherId)
+                            .gt("stock", stock)
                             .update();
+        if (!success) {
+            return Result.fail("库存不足");
+        }
         // 6.创建订单
         VoucherOrder voucherOrder = new VoucherOrder();
         // 6.1.创建订单id
