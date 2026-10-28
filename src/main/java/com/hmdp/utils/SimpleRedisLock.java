@@ -1,5 +1,6 @@
 package com.hmdp.utils;
 
+import cn.hutool.core.lang.UUID;
 import java.util.concurrent.TimeUnit;
 
 import javax.annotation.Resource;
@@ -10,6 +11,7 @@ public class SimpleRedisLock implements ILock {
     private StringRedisTemplate stringRedisTemplate;
     private String name;
     private static final String LOCK_KEY_PREFIX = "lock:";
+    private static final String ID_PREFIX = UUID.randomUUID().toString(true) + "-";
     public SimpleRedisLock(StringRedisTemplate stringRedisTemplate, String name) {
         this.stringRedisTemplate = stringRedisTemplate;
         this.name = name;
@@ -17,7 +19,7 @@ public class SimpleRedisLock implements ILock {
     @Override
     public boolean tryLock(long timeoutSec) {
         // 获取线程标示
-        long threadId = Thread.currentThread().getId();
+        String threadId = ID_PREFIX + Thread.currentThread().getId();
         // 尝试获取锁
         String key = LOCK_KEY_PREFIX + name;
         String value = threadId + "";
@@ -27,7 +29,15 @@ public class SimpleRedisLock implements ILock {
 
     @Override
     public void unlock() {
-        // 解锁
-        stringRedisTemplate.delete(LOCK_KEY_PREFIX + name);
+        // 获取线程标示
+        String threadId = ID_PREFIX + Thread.currentThread().getId();
+        // 获取锁的标示
+        String key = LOCK_KEY_PREFIX + name;
+        String value = stringRedisTemplate.opsForValue().get(key);
+        // 判断是否是当前线程的锁
+        if (threadId.equals(value)) {
+            // 解锁
+            stringRedisTemplate.delete(key);
+        }
     }
 }
