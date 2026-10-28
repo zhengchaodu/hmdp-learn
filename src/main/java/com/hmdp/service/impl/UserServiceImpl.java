@@ -11,6 +11,7 @@ import com.hmdp.entity.User;
 import com.hmdp.mapper.UserMapper;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.RegexUtils;
+import com.hmdp.utils.UserHolder;
 import jdk.nashorn.internal.runtime.regexp.joni.Regex;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -23,6 +24,7 @@ import javax.servlet.http.HttpSession;
 import java.util.HashMap;
 import java.util.Map;
 
+import static cn.hutool.core.util.StrUtil.isNotBlank;
 import static com.hmdp.utils.RedisConstants.*;
 import static com.hmdp.utils.SystemConstants.USER_NICK_NAME_PREFIX;
 
@@ -100,6 +102,17 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         // 仅仅这样设置的话，有效期只是从登录开始的30分钟，因此要在每次访问时都要刷新有效期，这个在拦截器中实现
         // 8、返回token
         return Result.ok(token);
+    }
+
+    @Override
+    public Result logout(String token) {
+        // 1. 删除Redis中该token对应的用户信息
+        if (isNotBlank(token)) {
+            stringRedisTemplate.delete(LOGIN_USER_KEY + token);
+        }
+        // 2. 移除ThreadLocal中的用户信息
+        UserHolder.removeUser();
+        return Result.ok();
     }
 
     private User createUserWithPhone(String phone) {
