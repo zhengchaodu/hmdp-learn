@@ -1,17 +1,27 @@
 package com.hmdp.utils;
 
 import cn.hutool.core.lang.UUID;
+
+import java.util.Collections;
 import java.util.concurrent.TimeUnit;
 
 import javax.annotation.Resource;
 
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 
 public class SimpleRedisLock implements ILock {
     private StringRedisTemplate stringRedisTemplate;
     private String name;
     private static final String LOCK_KEY_PREFIX = "lock:";
     private static final String ID_PREFIX = UUID.randomUUID().toString(true) + "-";
+    private static final DefaultRedisScript<Long> UNLOCK_SCRIPT;
+    static {
+        UNLOCK_SCRIPT = new DefaultRedisScript<>();
+        // /resources就是ClassPathResource路径
+        UNLOCK_SCRIPT.setLocation(new ClassPathResource("unlock.lua"));
+    }
     public SimpleRedisLock(StringRedisTemplate stringRedisTemplate, String name) {
         this.stringRedisTemplate = stringRedisTemplate;
         this.name = name;
@@ -29,15 +39,23 @@ public class SimpleRedisLock implements ILock {
 
     @Override
     public void unlock() {
-        // 获取线程标示
-        String threadId = ID_PREFIX + Thread.currentThread().getId();
-        // 获取锁的标示
-        String key = LOCK_KEY_PREFIX + name;
-        String value = stringRedisTemplate.opsForValue().get(key);
-        // 判断是否是当前线程的锁
-        if (threadId.equals(value)) {
-            // 解锁
-            stringRedisTemplate.delete(key);
-        }
+        // 调用lua脚本，保证原子性
+        stringRedisTemplate.execute(
+                UNLOCK_SCRIPT,
+                Collections.singletonList(LOCK_KEY_PREFIX + name),
+                ID_PREFIX + Thread.currentThread().getId()
+        );
     }
+//    public void unlock() {
+//        // 获取线程标示
+//        String threadId = ID_PREFIX + Thread.currentThread().getId();
+//        // 获取锁的标示
+//        String key = LOCK_KEY_PREFIX + name;
+//        String value = stringRedisTemplate.opsForValue().get(key);
+//        // 判断是否是当前线程的锁
+//        if (threadId.equals(value)) {
+//            // 解锁
+//            stringRedisTemplate.delete(key);
+//        }
+//    }
 }
